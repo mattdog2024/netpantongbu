@@ -7,96 +7,39 @@ on:
     paths:
       - '**.py'
       - 'requirements.txt'
+      - 'bdpan_ci.spec'
       - '.github/workflows/build-exe.yml'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release version tag (e.g. v1.0.1), leave empty to skip Release'
+        description: 'Release tag (e.g. v1.0.1), leave empty to skip Release'
         required: false
         default: ''
 
 jobs:
-  build-windows-exe:
+  build:
     name: Build on Windows
     runs-on: windows-latest
     env:
       PYTHONIOENCODING: utf-8
-      PYTHONUTF8: 1
+      PYTHONUTF8: "1"
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PyQt5==5.15.10 PyQtWebEngine==5.15.6 requests>=2.31.0 schedule>=1.2.1
-          pip install pyinstaller>=6.3.0
+          pip install PyQt5==5.15.10 PyQtWebEngine==5.15.6 requests schedule pyinstaller
 
-      - name: Write spec file
-        shell: pwsh
-        run: |
-          $spec = @"
-# -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all, collect_submodules
-
-block_cipher = None
-datas_all = []
-binaries_all = []
-hiddenimports_all = []
-
-for pkg in ['PyQt5.QtWebEngineWidgets', 'PyQt5.QtWebEngineCore']:
-    try:
-        d, b, h = collect_all(pkg)
-        datas_all += d
-        binaries_all += b
-        hiddenimports_all += h
-    except Exception:
-        pass
-
-a = Analysis(
-    ['main.py'],
-    pathex=['.'],
-    binaries=binaries_all,
-    datas=datas_all,
-    hiddenimports=[
-        'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
-        'PyQt5.QtNetwork', 'PyQt5.QtWebEngineWidgets',
-        'PyQt5.QtWebEngineCore', 'PyQt5.QtWebChannel',
-        'requests', 'urllib3', 'certifi', 'charset_normalizer',
-        'idna', 'pickle', 'json', 'threading', 'datetime', 'schedule',
-    ] + hiddenimports_all + collect_submodules('PyQt5'),
-    hookspath=[],
-    runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'pandas', 'scipy', 'tkinter', 'PIL'],
-    cipher=block_cipher,
-    noarchive=False,
-)
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-exe = EXE(
-    pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
-    name='BaiduPanScheduler',
-    debug=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    icon=None,
-)
-"@
-          [System.IO.File]::WriteAllText("bdpan_ci.spec", $spec, [System.Text.Encoding]::UTF8)
-          Write-Host "spec file written OK"
-
-      - name: Build EXE with PyInstaller
+      - name: Build EXE
         run: |
           pyinstaller bdpan_ci.spec --clean --noconfirm
           dir dist
@@ -104,27 +47,23 @@ exe = EXE(
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BaiduPanScheduler-Windows-EXE
+          name: BaiduPanScheduler-Windows
           path: dist/BaiduPanScheduler.exe
           retention-days: 7
           if-no-files-found: error
 
-      - name: Create GitHub Release
-        if: ${{ github.event.inputs.release_tag != '' }}
+      - name: Create Release
+        if: github.event.inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
-          name: "BaiduPan Scheduler ${{ github.event.inputs.release_tag }}"
+          name: BaiduPan Scheduler ${{ github.event.inputs.release_tag }}
           body: |
             ## 百度网盘定时下载器 ${{ github.event.inputs.release_tag }}
 
-            下载下方的 `BaiduPanScheduler.exe`，双击即可运行，无需安装任何软件。
+            下载 `BaiduPanScheduler.exe`，双击即可运行，无需安装。
 
-            **主要功能**
-            - 无需安装百度网盘客户端，扫码登录即可使用
-            - 支持定时下载（如每天 21:00 开始，06:00 停止）
-            - 支持断点续传、批量下载
-            - 图形化界面，操作简单
+            功能：无需百度客户端、扫码登录、定时下载、断点续传、图形界面。
           files: dist/BaiduPanScheduler.exe
           draft: false
           prerelease: false
