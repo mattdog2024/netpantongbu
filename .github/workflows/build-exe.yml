@@ -1,0 +1,154 @@
+name: 自动构建 Windows EXE
+
+# 触发条件：
+# 1. 推送到 main 分支时自动触发
+# 2. 手动在 Actions 页面点击 "Run workflow" 触发
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发布版本号（例如 v1.0.1），留空则不创建 Release'
+        required: false
+        default: ''
+
+jobs:
+  build-windows-exe:
+    name: 在 Windows 上打包 EXE
+    runs-on: windows-latest
+
+    steps:
+      # ── 第1步：拉取代码 ──────────────────────────────────────────
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # ── 第2步：配置 Python 环境 ──────────────────────────────────
+      - name: 配置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 第3步：安装依赖 ──────────────────────────────────────────
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt5==5.15.10 PyQtWebEngine==5.15.6 requests>=2.31.0 schedule>=1.2.1
+          pip install pyinstaller>=6.3.0
+
+      # ── 第4步：生成 PyInstaller spec 文件 ────────────────────────
+      - name: 生成打包配置
+        shell: python
+        run: |
+          spec_content = r"""
+          # -*- mode: python ; coding: utf-8 -*-
+          import sys
+          from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+          block_cipher = None
+
+          datas_all = []
+          binaries_all = []
+          hiddenimports_all = []
+
+          for pkg in ['PyQt5.QtWebEngineWidgets', 'PyQt5.QtWebEngineCore']:
+              try:
+                  d, b, h = collect_all(pkg)
+                  datas_all += d
+                  binaries_all += b
+                  hiddenimports_all += h
+              except Exception:
+                  pass
+
+          a = Analysis(
+              ['main.py'],
+              pathex=['.'],
+              binaries=binaries_all,
+              datas=datas_all,
+              hiddenimports=[
+                  'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
+                  'PyQt5.QtNetwork', 'PyQt5.QtWebEngineWidgets',
+                  'PyQt5.QtWebEngineCore', 'PyQt5.QtWebChannel',
+                  'requests', 'urllib3', 'certifi', 'charset_normalizer',
+                  'idna', 'pickle', 'json', 'threading', 'datetime', 'schedule',
+              ] + hiddenimports_all + collect_submodules('PyQt5'),
+              hookspath=[],
+              runtime_hooks=[],
+              excludes=['matplotlib', 'numpy', 'pandas', 'scipy', 'tkinter', 'PIL'],
+              cipher=block_cipher,
+              noarchive=False,
+          )
+
+          pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+          exe = EXE(
+              pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
+              name='百度网盘定时下载器',
+              debug=False,
+              strip=False,
+              upx=True,
+              upx_exclude=[],
+              runtime_tmpdir=None,
+              console=False,
+              icon=None,
+          )
+          """
+          with open('bdpan_ci.spec', 'w', encoding='utf-8') as f:
+              f.write(spec_content.strip())
+          print("spec 文件生成完毕")
+
+      # ── 第5步：执行打包 ──────────────────────────────────────────
+      - name: 打包 EXE
+        run: |
+          pyinstaller bdpan_ci.spec --clean --noconfirm
+          echo "打包完成，检查输出目录："
+          dir dist
+
+      # ── 第6步：上传 EXE 为 Artifact（每次构建都保留7天）─────────
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 百度网盘定时下载器-Windows-EXE
+          path: dist/百度网盘定时下载器.exe
+          retention-days: 7
+          if-no-files-found: error
+
+      # ── 第7步：如果手动触发并填写了版本号，则创建 Release ────────
+      - name: 创建 GitHub Release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "百度网盘定时下载器 ${{ github.event.inputs.release_tag }}"
+          body: |
+            ## 百度网盘定时下载器 ${{ github.event.inputs.release_tag }}
+
+            ### 下载说明
+            - 下载下方的 `百度网盘定时下载器.exe`，双击即可运行，无需安装。
+            - 程序会在同目录下生成 `bdpan_session.pkl`（登录状态）和 `bdpan_tasks.json`（任务列表）。
+
+            ### 主要功能
+            - 无需安装百度网盘客户端，扫码登录即可使用
+            - 支持定时下载（如每天 21:00 开始，06:00 停止）
+            - 支持断点续传、批量下载
+            - 图形化界面，操作简单
+
+            ### 使用方法
+            1. 双击运行 EXE
+            2. 点击右上角"登录百度账号"，扫码登录
+            3. 在左侧浏览网盘文件，选择要下载的文件
+            4. 在"定时设置"标签页配置下载时间段
+            5. 保持程序运行，到时间自动下载
+
+            > 如遇问题请在 [Issues](https://github.com/${{ github.repository }}/issues) 反馈。
+          files: dist/百度网盘定时下载器.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
