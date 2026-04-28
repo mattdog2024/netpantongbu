@@ -1,12 +1,12 @@
 """
-下载任务面板 - 显示任务列表、进度、控制按钮
+下载任务面板 - 显示任务列表、进度、控制按钮、详细日志
 """
 import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QFrame, QAbstractItemView, QMessageBox,
-    QSizePolicy
+    QSizePolicy, QTextEdit, QSplitter, QTabWidget
 )
 from PyQt5.QtCore import Qt, pyqtSlot, QTimer
 from PyQt5.QtGui import QColor, QFont
@@ -40,7 +40,7 @@ STATUS_COLORS = {
 
 
 class TaskPanelWidget(QWidget):
-    """任务面板"""
+    """任务面板（含日志）"""
 
     def __init__(self, manager, parent=None):
         super().__init__(parent)
@@ -70,6 +70,12 @@ class TaskPanelWidget(QWidget):
         self.stop_btn.clicked.connect(self._stop_download)
         btn_layout.addWidget(self.stop_btn)
 
+        self.retry_btn = QPushButton("重试失败")
+        self.retry_btn.setFixedHeight(32)
+        self.retry_btn.setToolTip("将所有失败的任务重置为等待中，然后重新下载")
+        self.retry_btn.clicked.connect(self._retry_failed)
+        btn_layout.addWidget(self.retry_btn)
+
         btn_layout.addStretch()
 
         self.clear_btn = QPushButton("清除已完成")
@@ -85,7 +91,15 @@ class TaskPanelWidget(QWidget):
 
         layout.addLayout(btn_layout)
 
-        # ---- 任务表格 ----
+        # ---- 上下分割：任务表格 + 日志面板 ----
+        splitter = QSplitter(Qt.Vertical)
+
+        # 任务表格
+        table_frame = QWidget()
+        table_layout = QVBoxLayout(table_frame)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(4)
+
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             ["文件名", "大小", "进度", "速度", "状态"]
@@ -110,17 +124,58 @@ class TaskPanelWidget(QWidget):
             "border-bottom: 1px solid #e5e7eb; padding: 6px 8px; "
             "font-weight: bold; color: #374151; }"
         )
-        layout.addWidget(self.table)
+        table_layout.addWidget(self.table)
 
-        # ---- 统计信息 ----
+        # 统计信息
         self.stats_label = QLabel("共 0 个任务")
         self.stats_label.setStyleSheet("color: #6b7280; font-size: 12px;")
-        layout.addWidget(self.stats_label)
+        table_layout.addWidget(self.stats_label)
+
+        splitter.addWidget(table_frame)
+
+        # 日志面板
+        log_frame = QWidget()
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(4)
+
+        log_header = QHBoxLayout()
+        log_title = QLabel("运行日志")
+        log_title.setStyleSheet("color: #374151; font-weight: bold; font-size: 12px;")
+        log_header.addWidget(log_title)
+        log_header.addStretch()
+        clear_log_btn = QPushButton("清空日志")
+        clear_log_btn.setFixedHeight(22)
+        clear_log_btn.setFixedWidth(70)
+        clear_log_btn.setStyleSheet(
+            "QPushButton { font-size: 11px; padding: 1px 6px; "
+            "border: 1px solid #d1d5db; border-radius: 3px; }"
+        )
+        clear_log_btn.clicked.connect(self._clear_log)
+        log_header.addWidget(clear_log_btn)
+        log_layout.addLayout(log_header)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(180)
+        self.log_text.setStyleSheet(
+            "QTextEdit { background: #1e1e2e; color: #cdd6f4; "
+            "font-family: Consolas, 'Courier New', monospace; "
+            "font-size: 11px; border: 1px solid #313244; border-radius: 4px; "
+            "padding: 4px; }"
+        )
+        log_layout.addWidget(self.log_text)
+
+        splitter.addWidget(log_frame)
+        splitter.setSizes([320, 200])
+
+        layout.addWidget(splitter)
 
     def _connect_signals(self):
         self.manager.task_added.connect(self._on_task_added)
         self.manager.task_updated.connect(self._on_task_updated)
         self.manager.all_tasks_updated.connect(self._on_all_tasks_updated)
+        self.manager.detail_log.connect(self._on_detail_log)
 
     def _load_existing_tasks(self):
         """加载已有任务"""
@@ -135,6 +190,14 @@ class TaskPanelWidget(QWidget):
                 "error_msg": task.error_msg,
             })
         self._update_stats()
+
+    @pyqtSlot(str)
+    def _on_detail_log(self, msg: str):
+        """接收详细日志并追加到日志框"""
+        self.log_text.append(msg)
+        # 自动滚动到底部
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     @pyqtSlot(str, dict)
     def _on_task_added(self, task_id: str, task_info: dict):
@@ -239,8 +302,12 @@ class TaskPanelWidget(QWidget):
         running = sum(
             1 for t in self.manager.tasks if t.status == "下载中"
         )
+        failed = sum(
+            1 for t in self.manager.tasks if t.status == "失败"
+        )
         self.stats_label.setText(
-            f"共 {total} 个任务  |  已完成 {completed}  |  下载中 {running}"
+            f"共 {total} 个任务  |  已完成 {completed}  |  "
+            f"下载中 {running}  |  失败 {failed}"
         )
 
     def _start_download(self):
@@ -249,8 +316,19 @@ class TaskPanelWidget(QWidget):
     def _stop_download(self):
         self.manager.stop_download()
 
+    def _retry_failed(self):
+        """重试所有失败的任务"""
+        count = self.manager.retry_failed()
+        if count > 0:
+            self.manager.start_download()
+        else:
+            QMessageBox.information(self, "提示", "没有失败的任务需要重试。")
+
     def _clear_completed(self):
         self.manager.clear_completed()
+
+    def _clear_log(self):
+        self.log_text.clear()
 
     def _remove_selected(self):
         selected_rows = set(
@@ -267,7 +345,6 @@ class TaskPanelWidget(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        # 找到对应的task_id
         task_ids_to_remove = []
         for row in selected_rows:
             name_item = self.table.item(row, 0)

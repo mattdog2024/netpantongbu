@@ -63,7 +63,8 @@ class DownloadManager(QObject):
     task_updated = pyqtSignal(str, dict)    # task_id, task_info
     task_added = pyqtSignal(str, dict)      # task_id, task_info
     all_tasks_updated = pyqtSignal(list)    # 所有任务列表
-    log_message = pyqtSignal(str)           # 日志消息
+    log_message = pyqtSignal(str)           # 简短状态消息（状态栏用）
+    detail_log = pyqtSignal(str)            # 详细日志（日志面板用）
     schedule_status_changed = pyqtSignal(str)  # 定时状态变化
 
     def __init__(self, api, config_file=None):
@@ -80,6 +81,22 @@ class DownloadManager(QObject):
         self._is_in_schedule_window = False
         self._load_tasks()
         self._start_schedule_checker()
+
+        # 把API的日志回调接入到detail_log信号
+        self.api.set_log_callback(self._api_log)
+
+    def _api_log(self, msg: str):
+        """接收API层的日志并转发到detail_log信号"""
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.detail_log.emit(f"[{ts}] {msg}")
+
+    def _log(self, msg: str, detail: str = None):
+        """发出日志信号"""
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_message.emit(msg)
+        self.detail_log.emit(f"[{ts}] {msg}")
+        if detail:
+            self.detail_log.emit(f"[{ts}]   {detail}")
 
     # ==================== 任务管理 ====================
 
@@ -98,7 +115,7 @@ class DownloadManager(QObject):
         self.tasks.append(task)
         self._save_tasks()
         self.task_added.emit(task_id, self._task_to_dict(task))
-        self.log_message.emit(f"已添加任务: {file_name}")
+        self._log(f"已添加任务: {file_name}")
         return task_id
 
     def add_folder_tasks(self, folder_info_list: list, save_dir: str) -> List[str]:
@@ -129,21 +146,44 @@ class DownloadManager(QObject):
         self._save_tasks()
         self.all_tasks_updated.emit(self._all_tasks_dict())
 
+    def retry_failed(self):
+        """将所有失败的任务重置为等待中，以便重新下载"""
+        count = 0
+        for task in self.tasks:
+            if task.status == TaskStatus.FAILED.value:
+                task.status = TaskStatus.PENDING.value
+                task.error_msg = ""
+                count += 1
+                self.task_updated.emit(task.task_id, self._task_to_dict(task))
+        if count > 0:
+            self._save_tasks()
+            self._log(f"已重置 {count} 个失败任务为等待中")
+        return count
+
     def start_download(self):
         """开始下载队列中的任务"""
         if self._download_thread and self._download_thread.is_alive():
+            self._log("下载线程已在运行中")
             return
+
+        # 检查是否有可下载的任务（PENDING 或 PAUSED）
+        pending = [t for t in self.tasks
+                   if t.status in (TaskStatus.PENDING.value, TaskStatus.PAUSED.value)]
+        if not pending:
+            self._log('没有待下载的任务（提示：失败的任务请点「重试失败」按钮）')
+            return
+
         self._stop_event.clear()
         self._download_thread = threading.Thread(
             target=self._download_worker, daemon=True
         )
         self._download_thread.start()
-        self.log_message.emit("开始下载...")
+        self._log(f"开始下载，共 {len(pending)} 个任务...")
 
     def stop_download(self):
         """停止下载"""
         self._stop_event.set()
-        self.log_message.emit("正在停止下载...")
+        self._log("正在停止下载...")
         # 将运行中的任务标记为暂停
         for task in self.tasks:
             if task.status == TaskStatus.RUNNING.value:
@@ -154,7 +194,7 @@ class DownloadManager(QObject):
     def _download_worker(self):
         """下载工作线程"""
         while not self._stop_event.is_set():
-            # 找到下一个待下载的任务
+            # 找到下一个待下载的任务（PENDING 或 PAUSED）
             pending_tasks = [
                 t for t in self.tasks
                 if t.status in (TaskStatus.PENDING.value, TaskStatus.PAUSED.value)
@@ -165,6 +205,7 @@ class DownloadManager(QObject):
             task = pending_tasks[0]
             task.status = TaskStatus.RUNNING.value
             self.task_updated.emit(task.task_id, self._task_to_dict(task))
+            self._log(f"正在下载: {task.file_name}")
 
             try:
                 def progress_cb(downloaded, total, speed):
@@ -188,20 +229,20 @@ class DownloadManager(QObject):
                     task.finished_at = datetime.datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
                     )
-                    self.log_message.emit(f"下载完成: {task.file_name}")
+                    self._log(f"下载完成: {task.file_name}")
                 else:
                     task.status = TaskStatus.PAUSED.value
-                    self.log_message.emit(f"下载暂停: {task.file_name}")
+                    self._log(f"下载暂停: {task.file_name}")
 
             except Exception as e:
                 task.status = TaskStatus.FAILED.value
                 task.error_msg = str(e)
-                self.log_message.emit(f"下载失败: {task.file_name} - {e}")
+                self._log(f"下载失败: {task.file_name}", str(e))
 
             self.task_updated.emit(task.task_id, self._task_to_dict(task))
             self._save_tasks()
 
-        self.log_message.emit("下载队列处理完毕")
+        self._log("下载队列处理完毕")
 
     # ==================== 定时管理 ====================
 
@@ -211,7 +252,7 @@ class DownloadManager(QObject):
         self._save_tasks()
         status = self._get_schedule_status_text()
         self.schedule_status_changed.emit(status)
-        self.log_message.emit(f"定时设置已更新: {status}")
+        self._log(f"定时设置已更新: {status}")
 
     def _start_schedule_checker(self):
         """启动定时检查器（每分钟检查一次）"""
@@ -242,19 +283,21 @@ class DownloadManager(QObject):
             in_window = start_minutes <= current_minutes < stop_minutes
 
         if in_window and not self._is_in_schedule_window:
-            # 进入时间窗口，开始下载
+            # 进入时间窗口，先把失败的任务重置，再开始下载
             self._is_in_schedule_window = True
-            self.log_message.emit(
+            self._log(
                 f"定时下载开始 ({self.schedule_config.start_hour:02d}:"
                 f"{self.schedule_config.start_minute:02d})"
             )
             self.schedule_status_changed.emit("定时下载进行中...")
+            # 将失败的任务重置为等待中，确保定时能重新下载
+            self.retry_failed()
             self.start_download()
 
         elif not in_window and self._is_in_schedule_window:
             # 离开时间窗口，停止下载
             self._is_in_schedule_window = False
-            self.log_message.emit(
+            self._log(
                 f"定时下载停止 ({self.schedule_config.stop_hour:02d}:"
                 f"{self.schedule_config.stop_minute:02d})"
             )

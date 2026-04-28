@@ -4,12 +4,17 @@ from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
+import sys
+sys.path.insert(0, '.')
+from version import APP_VERSION
+
 a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
     datas=[
         ('assets/icon.ico', 'assets'),
+        ('version.py', '.'),
     ],
     hiddenimports=[
         'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets',
@@ -20,6 +25,7 @@ a = Analysis(
         'gui', 'gui.main_window', 'gui.file_browser', 'gui.task_panel',
         'gui.schedule_panel', 'gui.login_widget',
         'core', 'core.baidu_api', 'core.download_manager', 'core.login_server',
+        'version',
     ],
     hookspath=[],
     runtime_hooks=[],
@@ -32,7 +38,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
-    name='BaiduPanScheduler',
+    name=f'BaiduPanScheduler_{APP_VERSION}',
     debug=False,
     strip=False,
     upx=True,

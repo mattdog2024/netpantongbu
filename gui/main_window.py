@@ -4,6 +4,7 @@
 import os
 import sys
 import datetime
+from version import APP_VERSION, APP_NAME, APP_NAME_EN
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTabWidget, QLabel, QPushButton,
@@ -127,7 +128,7 @@ class MainWindow(QMainWindow):
             Qt.WindowCloseButtonHint
         )
 
-        self.setWindowTitle("百度网盘定时下载器")
+        self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.setMinimumSize(1000, 680)
         self.resize(1200, 780)
         self.setStyleSheet(STYLE_SHEET)
@@ -149,11 +150,11 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(18, 0, 18, 0)
 
-        title_label = QLabel("百度网盘定时下载器")
+        title_label = QLabel(APP_NAME)
         title_label.setObjectName("titleLabel")
         top_layout.addWidget(title_label)
 
-        subtitle_label = QLabel("BaiduPan Scheduler  v1.0")
+        subtitle_label = QLabel(f"{APP_NAME_EN}  {APP_VERSION}")
         subtitle_label.setObjectName("subtitleLabel")
         top_layout.addWidget(subtitle_label)
         top_layout.addStretch()
