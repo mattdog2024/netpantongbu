@@ -208,7 +208,7 @@ class DownloadManager(QObject):
             self._log(f"正在下载: {task.file_name}")
 
             try:
-                def progress_cb(downloaded, total, speed):
+                def progress_cb(progress_pct, speed, downloaded, total):
                     task.downloaded = downloaded
                     task.speed = speed
                     if total > 0:

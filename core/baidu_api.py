@@ -2,35 +2,38 @@
 百度网盘核心API模块
 使用网页端Cookie模拟登录，无需开发者账号
 
-关键说明：
-  pan.baidu.com/api/download 接口需要 sign + timestamp 两个动态参数，
-  这两个参数必须从百度网盘主页 HTML 里实时提取，不能写死。
-  sign 的计算方式是 JS 加密，需要用 Python 复现。
+下载方案：
+  使用 pcs.baidu.com/rest/2.0/pcs/file?method=locatedownload 接口
+  只需要 BDUSS + 动态计算的 rand 参数（SHA1），不需要 sign/timestamp
+  此方案来自 BaiduPCS-Py 开源项目，经过验证可用
 """
 import os
 import re
 import json
 import time
-import base64
 import pickle
+import hashlib
 import requests
 import threading
-from urllib.parse import quote
+from urllib.parse import quote_plus
 
-# 百度网盘网页端常用接口
+# 接口地址
 BAIDU_HOME = "https://pan.baidu.com/disk/home"
 BAIDU_LIST_API = "https://pan.baidu.com/api/list"
-BAIDU_DOWNLOAD_API = "https://pan.baidu.com/api/download"
 BAIDU_QUOTA_API = "https://pan.baidu.com/api/quota"
+PCS_LOCATE_API = "https://pcs.baidu.com/rest/2.0/pcs/file"
 
-# 模拟浏览器请求头
+# 模拟浏览器 UA（用于登录验证、文件列表）
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# 下载时使用的 User-Agent（百度服务器验证）
-PAN_UA = "pan.baidu.com"
+# PCS 客户端 UA（用于下载）
+PCS_UA = "softxm;netdisk"
+
+# 百度网盘 App ID
+PAN_APP_ID = "250528"
 
 HEADERS = {
     "User-Agent": BROWSER_UA,
@@ -41,37 +44,25 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-APP_ID = "250528"
+
+def _sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
-def _calc_sign(sign3, sign1):
-    """
-    复现百度网盘主页的 JS sign2 函数
-    用于计算下载接口所需的 sign 参数
-    """
-    a = []
-    p = []
-    o = []
-    v = len(sign3)
+def _md5(s: str) -> str:
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
 
-    for q in range(256):
-        p.append(ord(sign3[q % v]))
-        a.append(q)
 
-    u = 0
-    for q in range(256):
-        u = (u + a[q] + p[q]) % 256
-        a[q], a[u] = a[u], a[q]
+class LoginExpiredError(Exception):
+    pass
 
-    i = 0
-    u = 0
-    for q in range(len(sign1)):
-        i = (i + 1) % 256
-        u = (u + a[i]) % 256
-        a[i], a[u] = a[u], a[i]
-        o.append(chr(ord(sign1[q]) ^ a[(a[i] + a[u]) % 256]))
 
-    return base64.b64encode("".join(o).encode("latin-1")).decode("utf-8")
+class APIError(Exception):
+    pass
+
+
+class DownloadError(Exception):
+    pass
 
 
 class BaiduPanAPI:
@@ -83,9 +74,7 @@ class BaiduPanAPI:
         self.bdstoken = None
         self.uk = None
         self.username = None
-        self._dsign = None
-        self._timestamp = None
-        self._sign_expire = 0  # sign 缓存过期时间（秒级时间戳）
+        self._bduss = None   # 从 Cookie 中提取，用于计算 rand
         self.session_file = session_file or os.path.join(
             os.path.expanduser("~"), ".bdpan_session.pkl"
         )
@@ -101,6 +90,7 @@ class BaiduPanAPI:
                 with open(self.session_file, "rb") as f:
                     cookies = pickle.load(f)
                     self.session.cookies.update(cookies)
+                    self._bduss = cookies.get("BDUSS", "")
         except Exception:
             pass
 
@@ -132,67 +122,32 @@ class BaiduPanAPI:
                 return m.group(1)
         return None
 
+    def _calc_rand(self, bduss: str, uid: str, timestamp: str) -> str:
+        """
+        计算 locatedownload 接口所需的 rand 参数
+        算法来自 BaiduPCS-Py 开源项目
+        """
+        enc = _sha1(bduss)
+        devuid = _md5(bduss).upper() + "|0"
+        rand = _sha1(enc + uid + "ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF" + timestamp + devuid)
+        return rand, devuid
+
     def _refresh_home(self):
-        """
-        访问网盘主页，提取 bdstoken / uk / sign1 / sign3 / timestamp
-        sign 有效期约 10 分钟，缓存复用
-        """
+        """访问网盘主页，提取 bdstoken / uk"""
         try:
             resp = self.session.get(BAIDU_HOME, timeout=20)
             html = resp.text
-
             token = self._extract_bdstoken(html)
             uk = self._extract_uk(html)
             if token:
                 self.bdstoken = token
             if uk:
                 self.uk = uk
-
-            # 提取 sign1 / sign3 / timestamp
-            sign1_m = re.search(r'"sign1"\s*:\s*"([^"]+)"', html)
-            sign3_m = re.search(r'"sign3"\s*:\s*"([^"]+)"', html)
-            ts_m = re.search(r'"timestamp"\s*:\s*(\d+)', html)
-
-            if sign1_m and sign3_m and ts_m:
-                sign1 = sign1_m.group(1)
-                sign3 = sign3_m.group(1)
-                ts = ts_m.group(1)
-                self._dsign = _calc_sign(sign3, sign1)
-                self._timestamp = ts
-                self._sign_expire = time.time() + 540  # 9分钟后过期
-                self._log(f"[API] sign刷新成功，timestamp={ts}")
-                return True
-            else:
-                self._log("[API] 主页中未找到sign1/sign3/timestamp，尝试备用提取")
-                # 备用：yunData 格式
-                m = re.search(r'yunData\.setData\((\{.+?\})\)', html, re.DOTALL)
-                if m:
-                    try:
-                        data = json.loads(m.group(1))
-                        sign1 = data.get("sign1", "")
-                        sign3 = data.get("sign3", "")
-                        ts = str(data.get("timestamp", ""))
-                        if sign1 and sign3 and ts:
-                            self._dsign = _calc_sign(sign3, sign1)
-                            self._timestamp = ts
-                            self._sign_expire = time.time() + 540
-                            self._log(f"[API] sign备用提取成功，timestamp={ts}")
-                            return True
-                    except Exception as e:
-                        self._log(f"[API] yunData解析失败: {e}")
-
-                self._log("[API] 无法提取sign，下载接口可能失败")
-                return token is not None
-
+            self._log(f"[API] 主页刷新完成，bdstoken={'已获取' if self.bdstoken else '未获取'}，uk={self.uk}")
+            return True
         except Exception as e:
             self._log(f"[API] 刷新主页失败: {e}")
             return False
-
-    def _ensure_sign(self):
-        """确保 sign 和 timestamp 是有效的（过期则刷新）"""
-        if not self._dsign or time.time() > self._sign_expire:
-            self._log("[API] sign已过期或不存在，重新获取...")
-            self._refresh_home()
 
     def check_login(self):
         try:
@@ -204,10 +159,10 @@ class BaiduPanAPI:
             if "bdstoken" in html or '"uk"' in html or "yunData" in html:
                 self.bdstoken = self._extract_bdstoken(html)
                 self.uk = self._extract_uk(html)
-                # 同时提取 sign
-                self._refresh_home()
+                # 从 Cookie 中提取 BDUSS
+                self._bduss = self.session.cookies.get("BDUSS", "")
                 self._save_session()
-                self._log(f"[API] 已登录，bdstoken={'已获取' if self.bdstoken else '未获取'}")
+                self._log(f"[API] 已登录，bdstoken={'已获取' if self.bdstoken else '未获取'}，BDUSS={'已获取' if self._bduss else '未获取'}")
                 return True
         except Exception as e:
             self._log(f"[API] 检查登录异常: {e}")
@@ -221,6 +176,7 @@ class BaiduPanAPI:
             )
             data = resp.json()
             if data.get("errno") == 0:
+                self._bduss = self.session.cookies.get("BDUSS", "")
                 self._refresh_home()
                 self._save_session()
                 self._log("[API] 已登录（quota接口验证）")
@@ -260,7 +216,7 @@ class BaiduPanAPI:
             "web": 1,
             "page": page,
             "num": num,
-            "app_id": APP_ID,
+            "app_id": PAN_APP_ID,
             "bdstoken": self.bdstoken or "",
             "logid": "",
             "clienttype": 0,
@@ -293,94 +249,100 @@ class BaiduPanAPI:
             page += 1
         return all_files
 
-    def get_download_link(self, fs_id):
+    def get_download_link(self, remote_path: str) -> str:
         """
-        获取文件真实下载链接（dlink）
-        必须使用 sign + timestamp 参数，这两个参数从主页动态提取
+        获取文件真实下载链接
+        使用 pcs.baidu.com/rest/2.0/pcs/file?method=locatedownload 接口
+        只需要 BDUSS，不需要 sign/timestamp
         """
-        self._ensure_sign()
-
-        if not self._dsign or not self._timestamp:
-            self._log("[下载] 无法获取sign/timestamp，下载链接获取失败")
+        bduss = self._bduss or self.session.cookies.get("BDUSS", "")
+        if not bduss:
+            self._log("[下载] 未找到BDUSS，无法获取下载链接")
             return None
 
-        self._log(f"[下载] 获取下载链接，fs_id={fs_id}")
-        self._log(f"[下载] sign={self._dsign[:20]}..., timestamp={self._timestamp}")
+        uid = str(self.uk or "")
+        timestamp = str(int(time.time()))
+        rand, devuid = self._calc_rand(bduss, uid, timestamp)
+
+        self._log(f"[下载] 获取下载链接: {os.path.basename(remote_path)}")
+        self._log(f"[下载] 使用locatedownload接口，timestamp={timestamp}")
 
         params = {
-            "sign": self._dsign,
-            "timestamp": self._timestamp,
-            "fidlist": json.dumps([int(fs_id)]),
-            "type": "dlink",
-            "app_id": APP_ID,
-            "web": 1,
-            "channel": "chunlei",
-            "clienttype": 0,
+            "apn_id": "1_0",
+            "app_id": PAN_APP_ID,
+            "channel": "0",
+            "check_blue": "1",
+            "clienttype": "17",
+            "es": "1",
+            "esl": "1",
+            "freeisp": "0",
+            "method": "locatedownload",
+            "path": quote_plus(remote_path),
+            "queryfree": "0",
+            "use": "0",
+            "ver": "4.0",
+            "time": timestamp,
+            "rand": rand,
+            "devuid": devuid,
+            "cuid": devuid,
+        }
+
+        headers = {
+            "User-Agent": PCS_UA,
+            "Cookie": f"BDUSS={bduss}",
         }
 
         try:
-            resp = self.session.get(BAIDU_DOWNLOAD_API, params=params, timeout=15)
-            result = resp.json()
-            errno = result.get("errno", -1)
-            self._log(f"[下载] download接口返回: errno={errno}")
+            resp = requests.get(
+                PCS_LOCATE_API,
+                params=params,
+                headers=headers,
+                timeout=20
+            )
+            self._log(f"[下载] locatedownload HTTP状态: {resp.status_code}")
 
-            if errno == 0:
-                dlink_list = result.get("dlink", [])
-                if dlink_list:
-                    dlink = dlink_list[0].get("dlink", "")
-                    if dlink:
-                        self._log(f"[下载] 成功获取dlink: {dlink[:80]}...")
-                        return dlink
-                self._log(f"[下载] errno=0但dlink为空，完整返回: {result}")
+            if resp.status_code != 200:
+                self._log(f"[下载] locatedownload返回非200: {resp.status_code}")
                 return None
 
-            elif errno == 2:
-                self._log("[下载] errno=2（参数错误），强制刷新sign后重试...")
-                self._sign_expire = 0  # 强制过期
-                self._ensure_sign()
-                if self._dsign and self._timestamp:
-                    params["sign"] = self._dsign
-                    params["timestamp"] = self._timestamp
-                    resp2 = self.session.get(BAIDU_DOWNLOAD_API, params=params, timeout=15)
-                    result2 = resp2.json()
-                    self._log(f"[下载] 重试返回: errno={result2.get('errno')}")
-                    if result2.get("errno") == 0:
-                        dlink_list = result2.get("dlink", [])
-                        if dlink_list:
-                            dlink = dlink_list[0].get("dlink", "")
-                            if dlink:
-                                self._log(f"[下载] 重试成功获取dlink")
-                                return dlink
+            info = resp.json()
+            self._log(f"[下载] locatedownload返回: {str(info)[:200]}")
+
+            if info.get("host") == "issuecdn.baidupcs.com":
+                self._log("[下载] 文件被百度屏蔽（issuecdn），无法下载")
                 return None
 
-            elif errno == -6:
-                raise LoginExpiredError("登录已过期，请重新登录")
+            urls = info.get("urls", [])
+            if urls:
+                url = urls[0].get("url", "")
+                if url:
+                    self._log(f"[下载] 成功获取下载链接: {url[:80]}...")
+                    return url
 
-            else:
-                self._log(f"[下载] 未知错误，errno={errno}，完整返回: {result}")
-                return None
+            self._log(f"[下载] 未找到下载链接，完整返回: {info}")
+            return None
 
-        except LoginExpiredError:
-            raise
         except Exception as e:
-            self._log(f"[下载] 获取下载链接异常: {e}")
+            self._log(f"[下载] locatedownload异常: {e}")
             return None
 
     def download_file(self, fs_id, file_path, save_dir, progress_callback=None,
                       stop_event=None):
         """
         下载单个文件，支持断点续传
+        file_path: 文件在网盘中的完整路径（如 /电影/xxx.mp4）
         """
         file_name = os.path.basename(file_path)
         local_path = os.path.join(save_dir, file_name)
         part_path = local_path + ".bdpart"
 
         self._log(f"[下载] 开始: {file_name}")
-        self._log(f"[下载] fs_id={fs_id}, 保存到: {save_dir}")
+        self._log(f"[下载] 网盘路径: {file_path}")
+        self._log(f"[下载] 保存到: {save_dir}")
 
-        dlink = self.get_download_link(fs_id)
+        dlink = self.get_download_link(file_path)
         if not dlink:
-            raise APIError(f"无法获取下载链接: {file_path}")
+            raise DownloadError(f"无法获取下载链接: {file_name}")
 
         # 断点续传
         downloaded = 0
@@ -388,19 +350,18 @@ class BaiduPanAPI:
             downloaded = os.path.getsize(part_path)
             self._log(f"[下载] 断点续传，已下载: {downloaded} 字节")
 
+        bduss = self._bduss or self.session.cookies.get("BDUSS", "")
         download_headers = {
-            "User-Agent": PAN_UA,
+            "User-Agent": PCS_UA,
+            "Cookie": f"BDUSS={bduss}",
             "Referer": "https://pan.baidu.com/disk/home",
         }
         if downloaded > 0:
             download_headers["Range"] = f"bytes={downloaded}-"
 
         try:
-            dl_session = requests.Session()
-            dl_session.cookies.update(dict(self.session.cookies))
-
             self._log(f"[下载] 发起HTTP请求...")
-            resp = dl_session.get(
+            resp = requests.get(
                 dlink,
                 headers=download_headers,
                 stream=True,
@@ -410,12 +371,11 @@ class BaiduPanAPI:
             self._log(f"[下载] HTTP状态码: {resp.status_code}")
 
             if resp.status_code == 403:
-                self._log("[下载] 收到403，刷新链接后重试...")
-                self._sign_expire = 0
-                dlink = self.get_download_link(fs_id)
+                self._log("[下载] 收到403，重新获取链接后重试...")
+                dlink = self.get_download_link(file_path)
                 if not dlink:
                     raise DownloadError(f"下载链接获取失败（403）: {file_name}")
-                resp = dl_session.get(
+                resp = requests.get(
                     dlink,
                     headers=download_headers,
                     stream=True,
@@ -446,54 +406,35 @@ class BaiduPanAPI:
 
             mode = "ab" if downloaded > 0 else "wb"
             with open(part_path, mode) as f:
-                for chunk in resp.iter_content(chunk_size=524288):
+                for chunk in resp.iter_content(chunk_size=524288):  # 512KB
                     if stop_event and stop_event.is_set():
-                        self._log(f"[下载] 用户停止: {file_name}")
+                        self._log(f"[下载] 已暂停: {file_name}")
                         return False
+
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
+
                         now = time.time()
-                        if now - last_time >= 0.5:
+                        if now - last_time >= 1.0:
                             speed = (downloaded - last_downloaded) / (now - last_time)
+                            progress = (downloaded / total * 100) if total > 0 else 0
+                            if progress_callback:
+                                progress_callback(progress, speed, downloaded, total)
                             last_time = now
                             last_downloaded = downloaded
-                            if progress_callback:
-                                progress_callback(downloaded, total, speed)
 
+            # 下载完成，重命名
             if os.path.exists(local_path):
                 os.remove(local_path)
             os.rename(part_path, local_path)
-
-            if progress_callback:
-                progress_callback(total, total, 0)
-
             self._log(f"[下载] 完成: {file_name}")
+            if progress_callback:
+                progress_callback(100.0, 0, total, total)
             return True
 
         except DownloadError:
             raise
         except Exception as e:
-            raise DownloadError(f"下载失败 {file_name}: {e}")
-
-    def update_cookies_from_browser(self, cookies_dict):
-        """从外部设置Cookie（用于登录后更新）"""
-        self.session.cookies.update(cookies_dict)
-        self._save_session()
-        try:
-            self._refresh_home()
-            self._log(f"[API] Cookie更新，bdstoken={'已获取' if self.bdstoken else '未获取'}")
-        except Exception as e:
-            self._log(f"[API] Cookie更新后刷新主页失败: {e}")
-
-
-class LoginExpiredError(Exception):
-    pass
-
-
-class APIError(Exception):
-    pass
-
-
-class DownloadError(Exception):
-    pass
+            self._log(f"[下载] 下载异常: {e}")
+            raise DownloadError(f"下载失败: {file_name} - {e}")

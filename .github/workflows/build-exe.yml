@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v1.2), leave empty to skip Release'
+        description: 'Release tag (e.g. v1.4), leave empty to skip Release'
         required: false
         default: ''
 
@@ -44,10 +44,22 @@ jobs:
           pyinstaller bdpan_ci.spec --clean --noconfirm
           dir dist
 
+      - name: Get version
+        id: get_version
+        shell: python
+        run: |
+          import sys, os
+          sys.path.insert(0, '.')
+          from version import APP_VERSION
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'version={APP_VERSION}\n')
+        env:
+          PYTHONIOENCODING: utf-8
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BaiduPanScheduler-Windows
+          name: BaiduPanScheduler-Windows-${{ steps.get_version.outputs.version }}
           path: dist/BaiduPanScheduler_*.exe
           retention-days: 7
           if-no-files-found: error
@@ -63,11 +75,10 @@ jobs:
 
             下载 `BaiduPanScheduler_*.exe`，双击即可运行，无需安装。
 
-            ### 本版本更新内容
-            - 修复下载失败问题（User-Agent 验证）
-            - 修复定时触发后未真正开始下载的问题
-            - 新增运行日志面板（实时显示下载详情）
-            - 新增「重试失败」按钮
+            ### 本版本更新内容（v1.4）
+            - 彻底放弃 sign/timestamp 方案，改用 pcs.baidu.com locatedownload 接口
+            - 修复下载链接获取失败（errno=2）问题
+            - 修复进度回调参数顺序错误
             - 版本号显示在标题栏和界面顶部
           files: dist/BaiduPanScheduler_*.exe
           draft: false
