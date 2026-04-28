@@ -104,6 +104,49 @@ class BaiduPanAPI:
         except Exception:
             pass
 
+    def update_cookies(self, cookies: dict):
+        """
+        更新Cookie（支持字典格式）
+        兼容旧版调用名 update_cookies_from_browser
+        """
+        if not cookies:
+            return
+        self.session.cookies.update(cookies)
+        # 提取 BDUSS
+        bduss = cookies.get("BDUSS", "")
+        if bduss:
+            self._bduss = bduss
+            self._log(f"[API] BDUSS已更新，长度={len(bduss)}")
+        else:
+            self._log("[API] 警告：Cookie中未找到BDUSS字段")
+        self._save_session()
+
+    # 兼容旧版调用
+    def update_cookies_from_browser(self, cookies: dict):
+        self.update_cookies(cookies)
+
+    def set_cookie_string(self, cookie_str: str):
+        """
+        直接解析 Cookie 字符串（如从浏览器开发者工具复制的整行 Cookie）
+        支持两种格式：
+          1. 完整格式：BDUSS=xxx; STOKEN=yyy; ...
+          2. 仅BDUSS：BDUSS=xxx（用户只复制了BDUSS这一行）
+        """
+        cookies = {}
+        # 先尝试按分号分割
+        for item in cookie_str.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, v = item.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k:
+                    cookies[k] = v
+        if cookies:
+            self.update_cookies(cookies)
+            return True
+        return False
+
     def _extract_bdstoken(self, html):
         for pat in [
             r'"bdstoken"\s*:\s*"([a-f0-9A-F]{32})"',
@@ -160,7 +203,7 @@ class BaiduPanAPI:
                 self.bdstoken = self._extract_bdstoken(html)
                 self.uk = self._extract_uk(html)
                 # 从 Cookie 中提取 BDUSS
-                self._bduss = self.session.cookies.get("BDUSS", "")
+                self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
                 self._save_session()
                 self._log(f"[API] 已登录，bdstoken={'已获取' if self.bdstoken else '未获取'}，BDUSS={'已获取' if self._bduss else '未获取'}")
                 return True
@@ -176,7 +219,7 @@ class BaiduPanAPI:
             )
             data = resp.json()
             if data.get("errno") == 0:
-                self._bduss = self.session.cookies.get("BDUSS", "")
+                self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
                 self._refresh_home()
                 self._save_session()
                 self._log("[API] 已登录（quota接口验证）")
