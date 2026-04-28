@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v1.0.1), leave empty to skip Release'
+        description: 'Release tag (e.g. v1.2), leave empty to skip Release'
         required: false
         default: ''
 
@@ -48,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: BaiduPanScheduler-Windows
-          path: dist/BaiduPanScheduler.exe
+          path: dist/BaiduPanScheduler_*.exe
           retention-days: 7
           if-no-files-found: error
 
@@ -61,10 +61,15 @@ jobs:
           body: |
             ## 百度网盘定时下载器 ${{ github.event.inputs.release_tag }}
 
-            下载 `BaiduPanScheduler.exe`，双击即可运行，无需安装。
+            下载 `BaiduPanScheduler_*.exe`，双击即可运行，无需安装。
 
-            功能：无需百度客户端、扫码登录、定时下载、断点续传、图形界面。
-          files: dist/BaiduPanScheduler.exe
+            ### 本版本更新内容
+            - 修复下载失败问题（User-Agent 验证）
+            - 修复定时触发后未真正开始下载的问题
+            - 新增运行日志面板（实时显示下载详情）
+            - 新增「重试失败」按钮
+            - 版本号显示在标题栏和界面顶部
+          files: dist/BaiduPanScheduler_*.exe
           draft: false
           prerelease: false
         env:
