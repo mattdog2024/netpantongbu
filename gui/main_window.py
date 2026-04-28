@@ -7,8 +7,7 @@ import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTabWidget, QLabel, QPushButton,
-    QStatusBar, QAction, QToolBar, QMessageBox,
-    QFileDialog, QFrame, QApplication
+    QStatusBar, QMessageBox, QFrame, QApplication
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize
 from PyQt5.QtGui import QIcon, QFont, QColor, QPalette
@@ -119,8 +118,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.api = api
         self.manager = manager
+
+        # 设置正常窗口标志：可移动、有最大化最小化关闭按钮
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.WindowMinimizeButtonHint |
+            Qt.WindowMaximizeButtonHint |
+            Qt.WindowCloseButtonHint
+        )
+
         self.setWindowTitle("百度网盘定时下载器")
-        self.setMinimumSize(1100, 720)
+        self.setMinimumSize(1000, 680)
         self.resize(1200, 780)
         self.setStyleSheet(STYLE_SHEET)
         self._setup_ui()
@@ -217,7 +225,7 @@ class MainWindow(QMainWindow):
 
     def _check_login_status(self):
         """启动时检查登录状态"""
-        QTimer.singleShot(500, self._do_check_login)
+        QTimer.singleShot(800, self._do_check_login)
 
     def _do_check_login(self):
         if self.api.check_login():
@@ -246,16 +254,44 @@ class MainWindow(QMainWindow):
     def _on_schedule_changed(self, status: str):
         self.status_schedule.setText(status)
 
+    def changeEvent(self, event):
+        """最小化时隐藏到托盘"""
+        from PyQt5.QtCore import QEvent
+        if event.type() == QEvent.WindowStateChange:
+            if self.isMinimized():
+                QTimer.singleShot(100, self.hide)
+        super().changeEvent(event)
+
     def closeEvent(self, event):
-        """关闭时停止下载"""
+        """点击关闭按钮时最小化到托盘而不是退出"""
         reply = QMessageBox.question(
-            self, "确认退出",
-            "退出程序将停止所有下载任务，确定退出吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            self, "关闭窗口",
+            "关闭窗口后程序将继续在后台运行（系统托盘）。\n\n"
+            "点击「最小化到托盘」继续后台运行，\n"
+            "点击「退出程序」完全退出。",
+            QMessageBox.StandardButton(0),  # 不用默认按钮
+            QMessageBox.NoButton,
         )
-        if reply == QMessageBox.Yes:
+        # 用自定义按钮
+        from PyQt5.QtWidgets import QMessageBox as QMB
+        msg = QMB(self)
+        msg.setWindowTitle("关闭窗口")
+        msg.setText(
+            "关闭窗口后程序将继续在后台运行（系统托盘）。\n\n"
+            "定时下载任务不会中断。"
+        )
+        btn_tray = msg.addButton("最小化到托盘", QMB.AcceptRole)
+        btn_quit = msg.addButton("退出程序", QMB.DestructiveRole)
+        msg.addButton("取消", QMB.RejectRole)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == btn_tray:
+            event.ignore()
+            self.hide()
+        elif clicked == btn_quit:
             self.manager.stop_download()
             event.accept()
+            QApplication.quit()
         else:
             event.ignore()

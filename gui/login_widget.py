@@ -4,7 +4,8 @@
 import sys
 import os
 from PyQt5.QtWidgets import (
-    QWidget, QHBoxLayout, QPushButton, QLabel, QMessageBox
+    QWidget, QHBoxLayout, QPushButton, QLabel, QMessageBox,
+    QInputDialog, QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
 
@@ -92,7 +93,9 @@ class LoginWidget(QWidget):
             dialog.login_success.connect(self._on_login_success)
             dialog.exec_()
         except ImportError:
-            # WebEngine可能不可用，提示手动输入Cookie
+            # WebEngine不可用，使用手动输入Cookie方式
+            self._show_cookie_input()
+        except Exception:
             self._show_cookie_input()
 
     def _on_login_success(self, cookies: dict):
@@ -112,35 +115,59 @@ class LoginWidget(QWidget):
             )
 
     def _show_cookie_input(self):
-        """备用：手动输入Cookie方式"""
-        from PyQt5.QtWidgets import QInputDialog
-        text, ok = QInputDialog.getMultiLineText(
-            self.window(),
-            "手动输入Cookie",
-            "请打开浏览器登录百度网盘，然后从开发者工具中复制Cookie粘贴到此处：\n"
-            "（格式：BDUSS=xxx; STOKEN=xxx; ...）",
-            ""
-        )
-        if ok and text.strip():
-            cookies = {}
-            for item in text.split(";"):
-                item = item.strip()
-                if "=" in item:
-                    k, v = item.split("=", 1)
-                    cookies[k.strip()] = v.strip()
-            if cookies:
-                self._on_login_success(cookies)
+        """手动输入Cookie方式（带详细说明）"""
+        dialog = CookieInputDialog(self.window())
+        if dialog.exec_() == QDialog.Accepted:
+            cookie_text = dialog.get_cookie_text()
+            if cookie_text.strip():
+                cookies = self._parse_cookie_string(cookie_text)
+                if cookies:
+                    self.api.update_cookies_from_browser(cookies)
+                    # 验证
+                    if self.api.check_login():
+                        self.set_logged_in(True)
+                        self.login_state_changed.emit(True)
+                        QMessageBox.information(
+                            self.window(), "登录成功",
+                            "Cookie验证成功，已登录！"
+                        )
+                    else:
+                        QMessageBox.warning(
+                            self.window(), "验证失败",
+                            "Cookie格式正确但验证失败。\n\n"
+                            "可能原因：\n"
+                            "1. Cookie已过期，请重新从浏览器复制\n"
+                            "2. 请确保复制的是登录后的Cookie\n"
+                            "3. 确保包含 BDUSS 字段"
+                        )
+                else:
+                    QMessageBox.warning(
+                        self.window(), "格式错误",
+                        "Cookie格式不正确，请按 名称=值; 名称=值 的格式输入"
+                    )
+
+    def _parse_cookie_string(self, text: str) -> dict:
+        """解析Cookie字符串为字典"""
+        cookies = {}
+        for item in text.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, v = item.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k:
+                    cookies[k] = v
+        return cookies
 
     def _do_logout(self):
         """退出登录"""
         reply = QMessageBox.question(
             self.window(), "确认退出登录",
-            "退出登录后需要重新扫码登录，确定吗？",
+            "退出登录后需要重新输入Cookie，确定吗？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            import os
             try:
                 if os.path.exists(self.api.session_file):
                     os.remove(self.api.session_file)
@@ -148,5 +175,77 @@ class LoginWidget(QWidget):
                 pass
             self.api.session.cookies.clear()
             self.api.bdstoken = None
+            self.api.uk = None
             self.set_logged_in(False)
             self.login_state_changed.emit(False)
+
+
+class CookieInputDialog(QDialog):
+    """Cookie输入对话框，带详细操作说明"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("输入百度网盘 Cookie")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(420)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # 说明文字
+        guide = QLabel(
+            "操作步骤：\n"
+            "1. 用 Chrome 浏览器打开 pan.baidu.com 并登录\n"
+            "2. 按 F12 打开开发者工具\n"
+            "3. 点击顶部「Network（网络）」标签\n"
+            "4. 按 F5 刷新页面\n"
+            "5. 点击左侧第一个请求（通常是 pan.baidu.com）\n"
+            "6. 在右侧找到「Request Headers（请求标头）」\n"
+            "7. 找到「cookie」这一行，右键 → Copy value\n"
+            "8. 粘贴到下方输入框"
+        )
+        guide.setStyleSheet(
+            "background: #eff6ff; border: 1px solid #bfdbfe; "
+            "border-radius: 6px; padding: 10px; color: #1e40af; "
+            "font-size: 12px; line-height: 1.6;"
+        )
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+
+        # 输入框
+        input_label = QLabel("粘贴 Cookie 内容（包含 BDUSS 和 STOKEN）：")
+        input_label.setStyleSheet("font-weight: bold; color: #374151;")
+        layout.addWidget(input_label)
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText(
+            "粘贴格式示例：\n"
+            "BDUSS=k8zRnFW...; STOKEN=109e308...; BAIDUID=C0D8A6...\n\n"
+            "（直接从开发者工具复制整行Cookie即可，不需要手动整理格式）"
+        )
+        self.text_edit.setMinimumHeight(120)
+        self.text_edit.setStyleSheet(
+            "border: 1px solid #d1d5db; border-radius: 4px; "
+            "padding: 8px; font-family: Consolas, monospace; font-size: 11px;"
+        )
+        layout.addWidget(self.text_edit)
+
+        # 提示
+        tip = QLabel("注意：Cookie 相当于登录密码，请勿泄露给他人。")
+        tip.setStyleSheet("color: #ef4444; font-size: 11px;")
+        layout.addWidget(tip)
+
+        # 按钮
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("确认登录")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_cookie_text(self) -> str:
+        return self.text_edit.toPlainText().strip()

@@ -17,14 +17,18 @@ BAIDU_LIST_API = "https://pan.baidu.com/api/list"
 BAIDU_FILEMETAS_API = "https://pan.baidu.com/api/filemetas"
 BAIDU_DOWNLOAD_API = "https://pan.baidu.com/api/download"
 BAIDU_QUOTA_API = "https://pan.baidu.com/api/quota"
+BAIDU_USERINFO_API = "https://pan.baidu.com/rest/2.0/membership/user"
+BAIDU_PAN_API = "https://pan.baidu.com/api/paninfo"
 
 # 模拟浏览器请求头
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://pan.baidu.com/disk/home",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
 
 # app_id: 使用百度官方网页端的app_id，无需开发者申请
@@ -39,6 +43,7 @@ class BaiduPanAPI:
         self.session.headers.update(HEADERS)
         self.bdstoken = None
         self.uk = None
+        self.username = None
         self.session_file = session_file or os.path.join(
             os.path.expanduser("~"), ".bdpan_session.pkl"
         )
@@ -57,7 +62,9 @@ class BaiduPanAPI:
     def _save_session(self):
         """保存session到文件"""
         try:
-            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
+            save_dir = os.path.dirname(self.session_file)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
             with open(self.session_file, "wb") as f:
                 pickle.dump(dict(self.session.cookies), f)
         except Exception:
@@ -67,13 +74,16 @@ class BaiduPanAPI:
         """从网盘主页提取bdstoken"""
         try:
             resp = self.session.get(BAIDU_HOME, timeout=15)
-            match = re.search(r'"bdstoken"\s*:\s*"([a-f0-9]+)"', resp.text)
-            if match:
-                return match.group(1)
-            # 备用方式
-            match = re.search(r"bdstoken\s*=\s*['\"]([a-f0-9]+)['\"]", resp.text)
-            if match:
-                return match.group(1)
+            # 多种匹配方式
+            patterns = [
+                r'"bdstoken"\s*:\s*"([a-f0-9A-F]+)"',
+                r"bdstoken\s*=\s*['\"]([a-f0-9A-F]+)['\"]",
+                r'"bdstoken":"([a-f0-9A-F]+)"',
+            ]
+            for pat in patterns:
+                match = re.search(pat, resp.text)
+                if match:
+                    return match.group(1)
         except Exception:
             pass
         return None
@@ -82,30 +92,93 @@ class BaiduPanAPI:
         """获取用户uk（用户唯一标识）"""
         try:
             resp = self.session.get(BAIDU_HOME, timeout=15)
-            match = re.search(r'"uk"\s*:\s*(\d+)', resp.text)
-            if match:
-                return match.group(1)
+            patterns = [
+                r'"uk"\s*:\s*(\d+)',
+                r"\"uk\":(\d+)",
+            ]
+            for pat in patterns:
+                match = re.search(pat, resp.text)
+                if match:
+                    return match.group(1)
         except Exception:
             pass
         return None
 
     def check_login(self):
-        """检查是否已登录，返回True/False"""
+        """
+        检查是否已登录，返回True/False
+        使用多个接口交叉验证，提高可靠性
+        """
+        # 方法1：访问网盘主页，检查是否跳转到登录页
         try:
-            resp = self.session.get(BAIDU_QUOTA_API, timeout=10)
+            resp = self.session.get(
+                BAIDU_HOME,
+                timeout=15,
+                allow_redirects=True
+            )
+            # 如果被重定向到passport登录页，说明未登录
+            if "passport.baidu.com" in resp.url or "login" in resp.url.lower():
+                return False
+            # 检查响应内容是否包含登录标志
+            if "bdstoken" in resp.text or '"uk"' in resp.text or "yunData" in resp.text:
+                self.bdstoken = self._extract_bdstoken(resp.text)
+                self.uk = self._extract_uk(resp.text)
+                self._save_session()
+                return True
+        except Exception:
+            pass
+
+        # 方法2：调用quota接口
+        try:
+            resp = self.session.get(
+                BAIDU_QUOTA_API,
+                params={"checkfree": 1, "checkexpire": 1},
+                timeout=10
+            )
             data = resp.json()
             if data.get("errno") == 0:
                 self.bdstoken = self._get_bdstoken()
                 self.uk = self._get_uk()
+                self._save_session()
                 return True
         except Exception:
             pass
+
         return False
+
+    def _extract_bdstoken(self, html):
+        """从HTML中提取bdstoken"""
+        patterns = [
+            r'"bdstoken"\s*:\s*"([a-f0-9A-F]+)"',
+            r"bdstoken\s*=\s*['\"]([a-f0-9A-F]+)['\"]",
+            r'"bdstoken":"([a-f0-9A-F]+)"',
+        ]
+        for pat in patterns:
+            match = re.search(pat, html)
+            if match:
+                return match.group(1)
+        return None
+
+    def _extract_uk(self, html):
+        """从HTML中提取uk"""
+        patterns = [
+            r'"uk"\s*:\s*(\d+)',
+            r'"uk":(\d+)',
+        ]
+        for pat in patterns:
+            match = re.search(pat, html)
+            if match:
+                return match.group(1)
+        return None
 
     def get_user_info(self):
         """获取用户信息（用量等）"""
         try:
-            resp = self.session.get(BAIDU_QUOTA_API, timeout=10)
+            resp = self.session.get(
+                BAIDU_QUOTA_API,
+                params={"checkfree": 1, "checkexpire": 1},
+                timeout=10
+            )
             data = resp.json()
             if data.get("errno") == 0:
                 used = data.get("used", 0)
@@ -149,7 +222,6 @@ class BaiduPanAPI:
             if data.get("errno") == 0:
                 return data.get("list", [])
             elif data.get("errno") == -6:
-                # 登录过期
                 raise LoginExpiredError("登录已过期，请重新登录")
         except LoginExpiredError:
             raise
@@ -205,7 +277,7 @@ class BaiduPanAPI:
                             timeout=10,
                         )
                         return head_resp.url
-                        
+
         except Exception as e:
             raise APIError(f"获取下载链接失败: {e}")
         return None
@@ -292,6 +364,7 @@ class BaiduPanAPI:
         """从外部设置Cookie（用于登录后更新）"""
         self.session.cookies.update(cookies_dict)
         self._save_session()
+        # 重新获取bdstoken和uk
         self.bdstoken = self._get_bdstoken()
         self.uk = self._get_uk()
 
