@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, pyqtSlot, QTime, QTimer
 from PyQt5.QtGui import QFont, QColor
 import datetime
 
-from ..core.download_manager import ScheduleConfig
+from core.download_manager import ScheduleConfig
 
 
 class SchedulePanelWidget(QWidget):

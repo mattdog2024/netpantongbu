@@ -87,7 +87,7 @@ class LoginWidget(QWidget):
     def _do_login(self):
         """打开登录对话框"""
         try:
-            from ..core.login_server import LoginDialog
+            from core.login_server import LoginDialog
             dialog = LoginDialog(self.window())
             dialog.login_success.connect(self._on_login_success)
             dialog.exec_()

@@ -13,10 +13,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSize
 from PyQt5.QtGui import QIcon, QFont, QColor, QPalette
 
-from .file_browser import FileBrowserWidget
-from .task_panel import TaskPanelWidget
-from .schedule_panel import SchedulePanelWidget
-from .login_widget import LoginWidget
+from gui.file_browser import FileBrowserWidget
+from gui.task_panel import TaskPanelWidget
+from gui.schedule_panel import SchedulePanelWidget
+from gui.login_widget import LoginWidget
 
 
 STYLE_SHEET = """
