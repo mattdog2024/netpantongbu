@@ -15,7 +15,9 @@ import pickle
 import hashlib
 import requests
 import threading
-from urllib.parse import quote_plus
+import urllib.request
+import urllib.error
+from urllib.parse import quote, quote_plus
 
 # 接口地址
 BAIDU_HOME = "https://pan.baidu.com/disk/home"
@@ -343,7 +345,7 @@ class BaiduPanAPI:
         """
         获取文件真实下载链接
         使用 pcs.baidu.com/rest/2.0/pcs/file?method=locatedownload 接口
-        只需要 BDUSS，不需要 sign/timestamp
+        参考 BaiduPCS-Py 开源项目实现
         """
         bduss = self._bduss or self.session.cookies.get("BDUSS", "")
         if not bduss:
@@ -355,8 +357,10 @@ class BaiduPanAPI:
         rand, devuid = self._calc_rand(bduss, uid, timestamp)
 
         self._log(f"[下载] 获取下载链接: {os.path.basename(remote_path)}")
-        self._log(f"[下载] 使用locatedownload接口，timestamp={timestamp}")
+        self._log(f"[下载] uid={uid}, timestamp={timestamp}")
 
+        # 注意：path 参数必须用 quote 而非 quote_plus，且要手动拼接URL
+        # 参考 BaiduPCS-Py 的实现，使用 urllib.request 直接发请求
         params = {
             "apn_id": "1_0",
             "app_id": PAN_APP_ID,
@@ -367,7 +371,7 @@ class BaiduPanAPI:
             "esl": "1",
             "freeisp": "0",
             "method": "locatedownload",
-            "path": quote_plus(remote_path),
+            "path": quote(remote_path, safe="/"),  # 保留斜杠，其他字符编码
             "queryfree": "0",
             "use": "0",
             "ver": "4.0",
@@ -376,6 +380,9 @@ class BaiduPanAPI:
             "devuid": devuid,
             "cuid": devuid,
         }
+        params_str = "&".join([f"{k}={v}" for k, v in params.items()])
+        url = f"{PCS_LOCATE_API}?{params_str}"
+        self._log(f"[下载] 请求URL: {url[:120]}")
 
         headers = {
             "User-Agent": PCS_UA,
@@ -383,20 +390,17 @@ class BaiduPanAPI:
         }
 
         try:
-            resp = requests.get(
-                PCS_LOCATE_API,
-                params=params,
-                headers=headers,
-                timeout=20
-            )
-            self._log(f"[下载] locatedownload HTTP状态: {resp.status_code}")
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            resp = urllib.request.urlopen(req, timeout=20)
+            status = resp.status
+            self._log(f"[下载] locatedownload HTTP状态: {status}")
 
-            if resp.status_code != 200:
-                self._log(f"[下载] locatedownload返回非200: {resp.status_code}")
+            if status != 200:
+                self._log(f"[下载] locatedownload返回非200: {status}")
                 return None
 
-            info = resp.json()
-            self._log(f"[下载] locatedownload返回: {str(info)[:200]}")
+            info = json.loads(resp.read())
+            self._log(f"[下载] locatedownload返回: {str(info)[:300]}")
 
             if info.get("host") == "issuecdn.baidupcs.com":
                 self._log("[下载] 文件被百度屏蔽（issuecdn），无法下载")
@@ -404,14 +408,24 @@ class BaiduPanAPI:
 
             urls = info.get("urls", [])
             if urls:
-                url = urls[0].get("url", "")
-                if url:
-                    self._log(f"[下载] 成功获取下载链接: {url[:80]}...")
-                    return url
+                dl_url = urls[0].get("url", "")
+                if dl_url:
+                    self._log(f"[下载] 成功获取下载链接: {dl_url[:80]}...")
+                    return dl_url
 
-            self._log(f"[下载] 未找到下载链接，完整返回: {info}")
+            # errno 说明失败原因
+            errno = info.get("errno", "N/A")
+            self._log(f"[下载] 未找到下载链接，errno={errno}，完整返回: {info}")
             return None
 
+        except urllib.error.HTTPError as e:
+            self._log(f"[下载] locatedownload HTTP错误: {e.code} {e.reason}")
+            try:
+                body = e.read().decode('utf-8', errors='replace')
+                self._log(f"[下载] 错误响应体: {body[:200]}")
+            except Exception:
+                pass
+            return None
         except Exception as e:
             self._log(f"[下载] locatedownload异常: {e}")
             return None
