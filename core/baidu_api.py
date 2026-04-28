@@ -178,7 +178,7 @@ class BaiduPanAPI:
     def _refresh_home(self):
         """访问网盘主页，提取 bdstoken / uk"""
         try:
-            resp = self.session.get(BAIDU_HOME, timeout=20)
+            resp = self.session.get(BAIDU_HOME, timeout=20, allow_redirects=True)
             html = resp.text
             token = self._extract_bdstoken(html)
             uk = self._extract_uk(html)
@@ -193,41 +193,88 @@ class BaiduPanAPI:
             return False
 
     def check_login(self):
-        try:
-            resp = self.session.get(BAIDU_HOME, timeout=20, allow_redirects=True)
-            if "passport.baidu.com" in resp.url or "login" in resp.url.lower():
-                self._log("[API] 未登录（重定向到登录页）")
-                return False
-            html = resp.text
-            if "bdstoken" in html or '"uk"' in html or "yunData" in html:
-                self.bdstoken = self._extract_bdstoken(html)
-                self.uk = self._extract_uk(html)
-                # 从 Cookie 中提取 BDUSS
-                self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
-                self._save_session()
-                self._log(f"[API] 已登录，bdstoken={'已获取' if self.bdstoken else '未获取'}，BDUSS={'已获取' if self._bduss else '未获取'}")
-                return True
-        except Exception as e:
-            self._log(f"[API] 检查登录异常: {e}")
-
-        # 备用：quota接口
+        """
+        验证登录状态。
+        直接用 quota API 验证，不访问会触发重定向的主页。
+        errno=0 表示已登录，errno=-6 表示未登录。
+        """
+        # 第一步：用 quota 接口验证（不会重定向，最可靠）
         try:
             resp = self.session.get(
                 BAIDU_QUOTA_API,
                 params={"checkfree": 1, "checkexpire": 1},
-                timeout=10
+                timeout=15,
+                allow_redirects=False,   # 禁止重定向，防止死循环
             )
-            data = resp.json()
-            if data.get("errno") == 0:
-                self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
-                self._refresh_home()
-                self._save_session()
-                self._log("[API] 已登录（quota接口验证）")
-                return True
+            self._log(f"[API] quota接口状态码: {resp.status_code}")
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    errno = data.get("errno", -1)
+                    self._log(f"[API] quota接口errno: {errno}")
+                    if errno == 0:
+                        self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
+                        self._save_session()
+                        # 后台异步获取bdstoken（不阻塞登录）
+                        threading.Thread(target=self._refresh_home_safe, daemon=True).start()
+                        self._log("[API] 已登录（quota接口验证成功）")
+                        return True
+                    else:
+                        self._log(f"[API] quota接口返回未登录，errno={errno}")
+                        return False
+                except Exception as e:
+                    self._log(f"[API] quota接口JSON解析失败: {e}，响应: {resp.text[:100]}")
+            elif resp.status_code in (301, 302, 303, 307, 308):
+                # 被重定向，说明未登录
+                location = resp.headers.get('Location', '')
+                self._log(f"[API] quota接口被重定向到: {location}，判定为未登录")
+                return False
+            else:
+                self._log(f"[API] quota接口返回异常状态码: {resp.status_code}")
         except Exception as e:
             self._log(f"[API] quota接口异常: {e}")
 
+        # 第二步：备用 - 用 list 接口验证
+        try:
+            resp2 = self.session.get(
+                BAIDU_LIST_API,
+                params={"dir": "/", "num": 1, "page": 1, "order": "name"},
+                timeout=15,
+                allow_redirects=False,
+            )
+            self._log(f"[API] list接口状态码: {resp2.status_code}")
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                errno2 = data2.get("errno", -1)
+                self._log(f"[API] list接口errno: {errno2}")
+                if errno2 == 0:
+                    self._bduss = self.session.cookies.get("BDUSS", self._bduss or "")
+                    self._save_session()
+                    self._log("[API] 已登录（list接口验证成功）")
+                    return True
+        except Exception as e:
+            self._log(f"[API] list接口异常: {e}")
+
         return False
+
+    def _refresh_home_safe(self):
+        """安全地刷新主页（不抛异常，用于后台线程）"""
+        try:
+            resp = self.session.get(
+                BAIDU_HOME, timeout=20,
+                allow_redirects=True,
+                max_redirects=5
+            )
+            html = resp.text
+            token = self._extract_bdstoken(html)
+            uk = self._extract_uk(html)
+            if token:
+                self.bdstoken = token
+            if uk:
+                self.uk = uk
+            self._log(f"[API] 主页刷新完成，bdstoken={'已获取' if self.bdstoken else '未获取'}，uk={self.uk}")
+        except Exception as e:
+            self._log(f"[API] 主页刷新失败（非致命）: {e}")
 
     def get_user_info(self):
         try:
