@@ -120,14 +120,8 @@ class MainWindow(QMainWindow):
         self.api = api
         self.manager = manager
 
-        # 设置正常窗口标志：可移动、有最大化最小化关闭按钮
-        self.setWindowFlags(
-            Qt.Window |
-            Qt.WindowMinimizeButtonHint |
-            Qt.WindowMaximizeButtonHint |
-            Qt.WindowCloseButtonHint
-        )
-
+        # 使用系统默认窗口（自带最大化、最小化、关闭按钮）
+        # 不调用 setWindowFlags，避免覆盖系统默认行为
         self.setWindowTitle(f"{APP_NAME}  {APP_VERSION}")
         self.setMinimumSize(1000, 680)
         self.resize(1200, 780)

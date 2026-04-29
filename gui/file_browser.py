@@ -2,6 +2,7 @@
 文件浏览器组件 - 浏览百度网盘目录，选择要下载的文件
 """
 import os
+import json
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTreeWidget, QTreeWidgetItem, QLineEdit,
@@ -52,7 +53,10 @@ class FileBrowserWidget(QWidget):
         self._current_path = "/"
         self._path_history = ["/"]
         self._load_thread = None
-        self._save_dir = os.path.expanduser("~/Downloads")
+        self._config_file = os.path.join(
+            os.path.expanduser("~"), ".bdpan_ui.json"
+        )
+        self._save_dir = self._load_save_dir()
         self._setup_ui()
 
     def _setup_ui(self):
@@ -284,6 +288,32 @@ class FileBrowserWidget(QWidget):
             item.setSelected(not all_selected)
         self.select_all_btn.setText("取消全选" if not all_selected else "全选")
 
+    def _load_save_dir(self) -> str:
+        """从配置文件读取上次保存的下载目录"""
+        try:
+            if os.path.exists(self._config_file):
+                with open(self._config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    saved = data.get("save_dir", "")
+                    if saved and os.path.isdir(saved):
+                        return saved
+        except Exception:
+            pass
+        return os.path.expanduser("~/Downloads")
+
+    def _persist_save_dir(self, path: str):
+        """把下载目录写入配置文件"""
+        try:
+            data = {}
+            if os.path.exists(self._config_file):
+                with open(self._config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["save_dir"] = path
+            with open(self._config_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def _browse_save_dir(self):
         """选择保存目录"""
         d = QFileDialog.getExistingDirectory(
@@ -292,6 +322,7 @@ class FileBrowserWidget(QWidget):
         if d:
             self._save_dir = d
             self.save_dir_edit.setText(d)
+            self._persist_save_dir(d)  # 持久化保存
 
     def _add_to_queue(self):
         """将选中的文件添加到下载队列"""

@@ -255,12 +255,12 @@ class DownloadManager(QObject):
         self._log(f"定时设置已更新: {status}")
 
     def _start_schedule_checker(self):
-        """启动定时检查器（每分钟检查一次）"""
+        """启动定时检查器（每10秒检查一次，精确触发）"""
         self._schedule_timer = QTimer()
         self._schedule_timer.timeout.connect(self._check_schedule)
-        self._schedule_timer.start(60000)  # 每60秒检查一次
-        # 立即检查一次
-        QTimer.singleShot(3000, self._check_schedule)
+        self._schedule_timer.start(10000)  # 每10秒检查一次，最多延迟10秒
+        # 立即检查一次（无延迟）
+        QTimer.singleShot(500, self._check_schedule)
 
     def _check_schedule(self):
         """检查是否到了定时下载时间"""
