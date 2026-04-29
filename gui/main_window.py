@@ -97,17 +97,9 @@ QSplitter::handle {
     width: 2px;
 }
 QFrame#topBar {
-    background: #2563eb;
+    background: #f0f4ff;
+    border-bottom: 1px solid #dde1e7;
     border-radius: 0px;
-}
-QLabel#titleLabel {
-    color: white;
-    font-size: 16px;
-    font-weight: bold;
-}
-QLabel#subtitleLabel {
-    color: #bfdbfe;
-    font-size: 11px;
 }
 """
 
@@ -137,24 +129,17 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ---- 顶部标题栏 ----
+        # ---- 顶部登录区（轻量，不遮挡系统标题栏）----
         top_bar = QFrame()
         top_bar.setObjectName("topBar")
-        top_bar.setFixedHeight(56)
+        top_bar.setFixedHeight(44)
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(18, 0, 18, 0)
-
-        title_label = QLabel(APP_NAME)
-        title_label.setObjectName("titleLabel")
-        top_layout.addWidget(title_label)
-
-        subtitle_label = QLabel(f"{APP_NAME_EN}  {APP_VERSION}")
-        subtitle_label.setObjectName("subtitleLabel")
-        top_layout.addWidget(subtitle_label)
-        top_layout.addStretch()
+        top_layout.setContentsMargins(12, 0, 12, 0)
+        top_layout.setSpacing(8)
 
         # 登录状态区域
         self.login_widget = LoginWidget(self.api, self)
+        top_layout.addStretch()
         top_layout.addWidget(self.login_widget)
 
         main_layout.addWidget(top_bar)
